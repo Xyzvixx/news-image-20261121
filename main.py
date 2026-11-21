@@ -1,435 +1,475 @@
-#!/usr/bin/env python3
-"""news-image-20261121 v1 — one-day world news poster, 1024x1024.
+"""news-image-20261121 v2 -- one-page newspaper, 1024x1024 PNG.
 
-Draws the whole image with Pillow from the story list embedded below.
-Deterministic: same bytes on every run, no network, no clock, no random.
-Writes ONLY to $MAKEFUN_OUTPUT_DIR/entry.png (default /output/entry.png).
+Renders "The World in One Day -- 21 November 2026": 8 featured stories
+plus 47 briefs (55 verified stories, Mon 17 - Sat 21 Nov 2026 window).
+
+Stdlib + Pillow only. Deterministic: no clock, no randomness, no network.
+Writes ONLY to $MAKEFUN_OUTPUT_DIR (default /output/entry.png).
 """
 
 import os
+import sys
+
 from PIL import Image, ImageDraw, ImageFont
 
 W, H = 1024, 1024
-OUT_DIR = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-OUT_PATH = os.path.join(OUT_DIR, "entry.png")
-
-FONT_DIR = "/usr/share/fonts/truetype/dejavu"
-SERIF_B = os.path.join(FONT_DIR, "DejaVuSerif-Bold.ttf")
-SANS = os.path.join(FONT_DIR, "DejaVuSans.ttf")
-SANS_B = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
-
-
-def font(path, size):
-    return ImageFont.truetype(path, size)
-
+MARGIN = 14
 
 # ---------------------------------------------------------------- palette
-PAPER = (247, 243, 234)
-INK = (20, 20, 20)
-NAVY = (16, 42, 67)
-NAVY2 = (28, 68, 102)
-TEAL = (14, 94, 88)
-RED = (178, 34, 34)
-GOLD = (176, 132, 24)
-CARD = (255, 255, 255)
-LINE = (180, 172, 156)
-MUTED = (90, 86, 76)
-BAND = (232, 226, 210)
+PAPER = (253, 253, 248)
+INK = (18, 18, 18)
+MUTED = (90, 90, 86)
+RED = (178, 28, 28)
+NAVY = (26, 42, 74)
+RULE = (150, 150, 142)
+PANEL = (244, 244, 238)
+PANEL_EDGE = (205, 205, 196)
+MAP_OCEAN = (214, 230, 240)
+MAP_LAND = (206, 204, 178)
+MAP_DOT = (178, 28, 28)
+WIRE_BG = (238, 238, 230)
+FOOT_BG = (238, 238, 230)
 
-ACCENTS = [RED, NAVY2, TEAL, (122, 63, 20), (90, 40, 90), (30, 90, 40),
-           (150, 60, 20), (60, 60, 120)]
+WARNINGS = []
 
 
-# ---------------------------------------------------------------- text tools
-def wrap(draw, text, fnt, max_w):
-    """Greedy word wrap; returns list of lines that fit max_w."""
-    words = text.split()
-    lines, cur = [], ""
-    for word in words:
-        trial = (cur + " " + word).strip()
-        if draw.textlength(trial, font=fnt) <= max_w:
-            cur = trial
+def warn(msg):
+    WARNINGS.append(msg)
+
+
+# ---------------------------------------------------------------- fonts
+def load_font(bold=False, serif=False, size=11):
+    base = "/usr/share/fonts/truetype/dejavu/"
+    names = []
+    if serif:
+        names = ["DejaVuSerif-Bold.ttf"] if bold else ["DejaVuSerif.ttf"]
+    else:
+        names = ["DejaVuSans-Bold.ttf"] if bold else ["DejaVuSans.ttf"]
+    for name in names:
+        path = base + name
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size)
+    return ImageFont.load_default(size)
+
+
+# ---------------------------------------------------------------- text wrap
+def wrap_words(draw, words, fonts, max_w):
+    """Greedy wrap. words: list of str; fonts: list of ImageFont, same length.
+    Returns list of lines, each a list of (word, font)."""
+    lines = []
+    cur = []
+    cur_w = 0
+    for word, font in zip(words, fonts):
+        ww = draw.textlength(word, font=font)
+        space = draw.textlength(" ", font=font) if cur else 0
+        if cur and cur_w + space + ww > max_w:
+            lines.append(cur)
+            cur = [(word, font)]
+            cur_w = ww
         else:
             if cur:
-                lines.append(cur)
-            cur = word
+                cur_w += space
+            cur.append((word, font))
+            cur_w += ww
     if cur:
         lines.append(cur)
     return lines
 
 
-def fit_line(draw, text, fnt, max_w):
-    """Truncate one line with an ellipsis so it fits max_w."""
-    if draw.textlength(text, font=fnt) <= max_w:
-        return text
-    while text and draw.textlength(text + "...", font=fnt) > max_w:
-        text = text[:-1]
-    return text + "..."
+def draw_wrapped(draw, lines, x, y, lh):
+    for line in lines:
+        cx = x
+        for word, font in line:
+            draw.text((cx, y), word, font=font, fill=INK)
+            cx += draw.textlength(word, font=font) + draw.textlength(" ", font=font)
+        y += lh
+    return y
 
 
-# ---------------------------------------------------------------- glyphs
-def glyph_quake(d, x, y, s, col):
-    # mountains + crack zigzag
-    d.polygon([(x, y + s), (x + s * 0.3, y + s * 0.25), (x + s * 0.6, y + s)],
-              fill=col)
-    d.polygon([(x + s * 0.4, y + s), (x + s * 0.7, y + s * 0.1),
-               (x + s, y + s)], fill=(col[0] // 2 + 60, col[1] // 2 + 60,
-                                      col[2] // 2 + 60))
-    pts = [(x + s * 0.1, y + s * 0.55), (x + s * 0.3, y + s * 0.75),
-           (x + s * 0.5, y + s * 0.5), (x + s * 0.7, y + s * 0.8),
-           (x + s * 0.9, y + s * 0.55)]
-    d.line(pts, fill=(255, 255, 255), width=3)
+def mixed_block(draw, lead, rest, f_bold, f_reg, max_w, max_lines, tag):
+    """One brief: bold lead words then regular rest, wrapped to max_lines.
+    Returns lines used. Records a warning on overflow."""
+    words = lead.split() + rest.split()
+    fonts = [f_bold] * len(lead.split()) + [f_reg] * len(rest.split())
+    lines = wrap_words(draw, words, fonts, max_w)
+    if len(lines) > max_lines:
+        warn("%s overflow: %d lines (max %d): %s" % (tag, len(lines), max_lines, lead))
+        lines = lines[:max_lines]
+    return lines
 
 
-def glyph_summit(d, x, y, s, col):
-    # three podiums / three leaders at a table
-    for i, c in enumerate([(178, 34, 34), (16, 42, 67), (176, 132, 24)]):
-        bx = x + i * s * 0.36
-        d.ellipse([bx, y + s * 0.1, bx + s * 0.24, y + s * 0.34], fill=c)
-        d.rectangle([bx - s * 0.02, y + s * 0.4, bx + s * 0.26, y + s],
-                    fill=c)
-    d.rectangle([x, y + s * 0.62, x + s, y + s * 0.72], fill=(255, 255, 255))
-
-
-def glyph_burst(d, x, y, s, col):
-    # explosion starburst
-    cx, cy = x + s / 2, y + s / 2
-    for k in range(8):
-        ang = k * 3.14159 / 4
-        import math
-        ex = cx + math.cos(ang) * s * 0.5
-        ey = cy + math.sin(ang) * s * 0.5
-        d.line([cx, cy, ex, ey], fill=col, width=4)
-    d.ellipse([cx - s * 0.2, cy - s * 0.2, cx + s * 0.2, cy + s * 0.2],
-              fill=(255, 200, 40))
-
-
-def glyph_chart_down(d, x, y, s, col):
-    d.line([(x, y + s * 0.2), (x + s * 0.3, y + s * 0.45),
-            (x + s * 0.55, y + s * 0.35), (x + s * 0.85, y + s * 0.85)],
-           fill=col, width=5)
-    d.polygon([(x + s * 0.85, y + s * 0.85), (x + s * 0.62, y + s * 0.85),
-               (x + s * 0.85, y + s * 0.62)], fill=col)
-    d.line([(x, y + s), (x + s, y + s)], fill=MUTED, width=2)
-
-
-def glyph_shield(d, x, y, s, col):
-    d.polygon([(x + s * 0.5, y), (x + s, y + s * 0.2), (x + s, y + s * 0.6),
-               (x + s * 0.5, y + s), (x, y + s * 0.6), (x, y + s * 0.2)],
-              outline=col, width=4)
-    d.line([(x + s * 0.3, y + s * 0.5), (x + s * 0.45, y + s * 0.68),
-            (x + s * 0.75, y + s * 0.32)], fill=col, width=4)
-
-
-def glyph_scales(d, x, y, s, col):
-    d.line([(x + s * 0.5, y + s * 0.05), (x + s * 0.5, y + s * 0.9)],
-           fill=col, width=3)
-    d.line([(x + s * 0.1, y + s * 0.25), (x + s * 0.9, y + s * 0.25)],
-           fill=col, width=3)
-    for cx in (x + s * 0.18, x + s * 0.82):
-        d.line([(cx, y + s * 0.25), (cx - s * 0.14, y + s * 0.6),
-                (cx + s * 0.14, y + s * 0.6)], fill=col, width=2)
-        d.line([(cx - s * 0.14, y + s * 0.6), (cx + s * 0.14, y + s * 0.6)],
-               fill=col, width=3)
-    d.rectangle([x + s * 0.35, y + s * 0.9, x + s * 0.65, y + s], fill=col)
-
-
-def glyph_bars(d, x, y, s, col):
-    for i in range(5):
-        bx = x + i * s * 0.22
-        d.rectangle([bx, y, bx + s * 0.09, y + s], fill=col)
-    d.line([(x, y + s * 0.18), (x + s, y + s * 0.18)], fill=col, width=3)
-
-
-def glyph_server(d, x, y, s, col):
-    for i in range(3):
-        by = y + i * s * 0.34
-        d.rectangle([x, by, x + s * 0.8, by + s * 0.26], outline=col, width=3)
-        d.ellipse([x + s * 0.08, by + s * 0.08, x + s * 0.16, by + s * 0.18],
-                  fill=col)
-    d.line([(x + s * 0.85, y + s * 0.1), (x + s * 0.85, y + s * 0.9)],
-           fill=col, width=3)
-
-
-GLYPHS = [glyph_quake, glyph_summit, glyph_burst, glyph_chart_down,
-          glyph_shield, glyph_scales, glyph_bars, glyph_server]
-
-# ---------------------------------------------------------------- stories
+# ---------------------------------------------------------------- content
+# All display lines composed in-session from verified wire reporting.
+# Day marks: (Tue)/(Thu)/(Fri) on Mon-Fri briefs; Sat items unmarked.
 FEATURED = [
-    ("PERU", "6.8 quake shakes central Peru",
-     "Junin region hit Fri; tremors felt in Lima, 320 km away.",
-     "PERU GEOPHYSICAL INSTITUTE"),
-    ("SHENZHEN", "Trump, Xi and Putin hold trilateral talks",
-     "Joint declaration: nuclear war 'cannot be won and must never be fought'.",
-     "APEC SUMMIT"),
-    ("POLAND", "Russian missile hits Poland, Tusk says",
-     "NATO calls it a grave airspace violation.",
-     "BBC"),
-    ("MARKETS", "Stocks plunge: S&P -3.7%, Nasdaq -5.28%",
-     "Nvidia falls ~14% as SEC probes its accounting.",
-     "REUTERS / BBC"),
-    ("DENMARK", "Denmark says it foiled a Russian assassination plot",
-     "Target: a US-Ukrainian rapper; diplomat expelled.",
-     "BBC"),
-    ("THE HAGUE", "World Court: Myanmar committed genocide",
-     "ICJ: state responsibility over Rohingya (Thu).",
-     "AP / PBS"),
-    ("NEW YORK", "Mamdani: close Rikers Island jail by 2032",
-     "Plan pushes past the 2027 legal deadline by five years.",
-     "BBC"),
-    ("WASHINGTON", "Trump threatens ban on overseas data centres",
-     "US firms face a 'tremendous tax' abroad.",
-     "BBC"),
+    ("F1", "COP31",
+     "COP31 in overtime as talks miss deadline",
+     "Talks run past their Friday close with no deal and a third draft is due "
+     "on Saturday morning. The EU calls the text too weak, and Panama vows "
+     "to block it."),
+    ("F2", "RIYADH",
+     "Three Houthi missiles downed over Riyadh",
+     "Saudi defences down the rockets early on Saturday, the third "
+     "straight night of alerts. The Houthis warn Jeddah and Red Sea "
+     "ports may be next."),
+    ("F3", "PERU",
+     "M6.7 quake shakes Peru's Junin region",
+     "The tremor strikes at 00:09 UTC, 108 km deep, and is felt in Lima. "
+     "Early reports list no deaths and no major damage from the shaking."),
+    ("F4", "UKRAINE",
+     "Deadly strikes hit Kryvyi Rih and Kyiv",
+     "Three die, a boy of seven among them, and 42 are hurt in Kryvyi "
+     "Rih; Kyiv's crossings are damaged. Kyiv says it hit three Russian "
+     "systems."),
+    ("F5", "CRICKET",
+     "Rahul's ton puts India on top in Wellington",
+     "KL Rahul reaches 136 and becomes the first Indian opener with Test "
+     "hundreds in all four SENA nations, as India moves to 344 for 2 at tea."),
+    ("F6", "MARKETS",
+     "Bitcoin slides below $59,000",
+     "The coin trades near $58,983, down 3.9%, as the tech sell-off spreads. "
+     "Anthropic shares fall 8.5% a day after their stock-market debut."),
+    ("F7", "UK-EU",
+     "UK and EU seal post-Brexit reset",
+     "Brussels agrees easier food trade, linked carbon markets and a youth "
+     "scheme offering 100,000 visas a year for under-32s to live, work "
+     "and study."),
+    ("F8", "WASHINGTON",
+     "Trump threatens tax on overseas data centres",
+     "The president says US firms will face a 'tremendous tax' if they build "
+     "AI data centres abroad, naming a project in Finland. No rate or "
+     "mechanism is given."),
 ]
 
-# (group, headline) — one line each, kept short for the column width
-BRIEFS = [
-    ("NORTH AMERICA (10)", [
-        "Trump urges Nvidia to reinstate Huang; board says no",
-        "US declassifies more UFO footage filmed in Middle East",
-        "White House removes cyber-security chief after outages",
-        "US judge rejects Trump homelessness plan revamp",
-        "Virginia child dies in first measles death of 2026",
-        "Hackers breached US Dept of Agriculture, NBC reports",
-        "GTA 6: $3.79bn in first-day retail sales (Fri)",
-        "YouTube nears ~$3bn payout to US school districts (Fri)",
-        "Court approves $7.25bn Bayer Roundup settlement (Fri)",
-        "LA jury convicts man who started 2025 Palisades Fire",
+# (lead, rest) -- lead renders bold, rest regular. Keep each to 2 lines.
+BRIEFS_A = [
+    ("SAT 21 NOV", [
+        ("COP31 'fossil summit' warning.",
+         "EU envoys say the draft risks a summit with no fossil-fuel language."),
+        ("Panama vows to block text.",
+         "Panama says it will veto any final deal that ignores its demands."),
+        ("PLN signs six clean-energy deals.",
+         "Indonesia's state utility inks six green power agreements."),
+        ("Houthis threaten Jeddah ports.",
+         "The group warns Red Sea ports and Jeddah are in range after Riyadh."),
+        ("Vance: Iran call is Trump's.",
+         "The vice-president says any strike on Iran rests with the president."),
+        ("SpaceX funding under threat.",
+         "US lawmakers move to put SpaceX funding at risk."),
+        ("(Thu) Texas execution: 63 minutes.",
+         "Reinaldo Dennes's lethal injection ran over an hour in Huntsville."),
+        ("Palisades arsonist convicted.",
+         "A jury finds the man who started LA's deadly 2025 fire guilty."),
+        ("Roundup deal approved: $7.25bn.",
+         "A court signs off Bayer's settlement of cancer claims."),
+        ("Freight train derails in Sejong.",
+         "A goods train comes off the rails in South Korea's Sejong city."),
     ]),
-    ("EUROPE (10)", [
-        "UK-EU deal: food trade, carbon, youth mobility (Fri)",
-        "Cost-of-living protests sweep 25+ countries (Fri)",
-        "French police sentenced for 2020 Zecler beating",
-        "Depardieu probed over sexual allegations",
-        "German metalworkers in first 24h strike in 8 years",
-        "Lufthansa to cut 1,000 jobs at Frankfurt, Munich",
-        "De Villepin announces 2027 French presidency bid",
-        "Lagarde gives final address as ECB president (Fri)",
-        "EU Council adopts EUR 1bn military aid to Ukraine",
-        "Kyiv crossings hit; Kryvyi Rih: 2 dead, 42 hurt",
-    ]),
-    ("ASIA (9)", [
-        "Cyclone Akvan crosses Odisha coast near Gopalpur",
-        "Record Rs 1.22 lakh crore flows into Indian shares",
-        "KL Rahul: Test 100s in all four SENA countries",
-        "Nepal PM Balen Shah heads to Delhi on first trip",
-        "Indian man jailed 19+ yrs in US Sikh murder plot",
-        "India firm on Indus Treaty as SCO forum meets",
-        "Top court allows Deepathoon lamp, one-time only",
-        "Sensex rallies nearly 898 points (Fri)",
-        "India women beat Malaysia 4-1 in hockey opener",
-    ]),
-    ("MIDDLE EAST & AFRICA (5)", [
-        "US adds four Iranians to OFAC sanctions list",
-        "Tanker fire reported in Strait of Hormuz (Fri)",
-        "ANC fights to hold South Africa's key cities",
-        "Nearly 600 women killed in South Africa in 3 months",
-        "COP31 talks enter crucial final stage in Turkey",
-    ]),
-    ("SCIENCE, TECH & SPORT (4)", [
-        "Anthropic mathematician claims Riemann proof (unverified)",
-        "F1 Las Vegas: Russell fastest; contact with Verstappen",
-        "Norway warns AI in public cases can discriminate",
-        "Spain: data centres must use 80% renewables",
+    ("THU 19 NOV", [
+        ("(Thu) Shenzhen peace declaration.",
+         "Trump, Xi and Putin: nuclear war 'cannot be won, must never be fought'."),
+        ("(Thu) Anthropic shares jump 17%.",
+         "The AI firm's stock debuts with a 17% first-day rise."),
+        ("(Thu) GTA VI: $3.79bn in a day.",
+         "The game's first-day retail sales set an entertainment record."),
+        ("(Thu) Fiona the hippo dies, 9.",
+         "Cincinnati's beloved hippo dies after swallowing a visitor's knit hat."),
+        ("(Tue) Voyager 1, a light-day away.",
+         "NASA's probe passes 25.9bn km from Earth; a signal now takes a day."),
     ]),
 ]
 
-TIMELINE = [
-    ("02:27", "Kryvyi Rih toll"),
-    ("03:34", "4 Iranians sanctioned"),
-    ("04:04", "Donbas-NATO idea"),
-    ("05:57", "Denmark plot foiled"),
-    ("07:08", "Riemann claim"),
-    ("08:01", "Rikers 2032"),
-    ("08:34", "ANC cities"),
-    ("09:02", "Migrant-scam probe"),
+BRIEFS_B = [
+    ("SAT 21 NOV, CONT.", [
+        ("Taipei passes budget, cash payout.",
+         "Taiwan's capital approves its budget plus a payout to residents."),
+        ("Bangkok arsenic river plan.",
+         "The city unveils a plan to tackle arsenic in a river."),
+        ("Odisha: 372,000 displaced by Akvan.",
+         "Akvan's aftermath leaves hundreds of thousands uprooted."),
+        ("World backs ICJ Myanmar ruling.",
+         "Switzerland welcomes it; rights groups press for sanctions."),
+        ("Verstappen called to stewards.",
+         "The champion faces the stewards in Las Vegas GP practice."),
+        ("Frosty APEC reception for Takaichi.",
+         "Japan's premier meets a cool welcome on the summit sidelines."),
+        ("Ottawa: US leadership doubted.",
+         "Doubts about American leadership surface at a security forum."),
+        ("Kabul ISIS-K drone warning.",
+         "The UN warns over an ISIS-K drone threat in Kabul."),
+        ("Berlin students protest rearmament.",
+         "Students march in Berlin against the rearmament drive."),
+        ("Brasilia indigenous land bill.",
+         "A bill on indigenous land advances in Brazil's capital."),
+    ]),
+    ("FRI 20 NOV", [
+        ("(Fri) Russian missiles land in Poland.",
+         "Two missiles and a drone come down as allies drill nearby."),
+        ("(Fri) Kyiv bridges hit.",
+         "Russian strikes damage three crossings over the Dnipro in the capital."),
+        ("(Fri) Cyclone Akvan makes landfall.",
+         "The storm crosses the Odisha coast near Gopalpur."),
+        ("(Thu) ICJ: Myanmar committed genocide.",
+         "The world court finds Myanmar guilty over the Rohingya."),
+        ("(Fri) Wall Street enters correction.",
+         "S&P falls 3.7% and Nasdaq 5.28%; Nvidia drops ~14% on a probe report."),
+    ]),
 ]
 
-# dots on the stylised map: (x fraction, y fraction, label, label dx, label dy)
+BRIEFS_C = [
+    ("SAT 21 NOV, CONT.", [
+        ("Sydney heatwave.",
+         "Temperatures soar as a heatwave grips Sydney."),
+        ("Asset-seizure law advances.",
+         "Jakarta moves ahead with a law to confiscate criminal assets."),
+        ("Iran engagement cost $48.3bn.",
+         "Washington tallies the price of its Iran engagement."),
+        ("Kyiv: 3 Russian missile systems hit.",
+         "Ukraine says its forces destroyed three Russian missile systems."),
+        ("ANC fights for its cities.",
+         "After its 31% local-election low, the ANC battles to hold key cities."),
+        ("Zelensky: Crimea bridge 'will not survive'.",
+         "Kyiv's leader calls the Crimean bridge a legitimate target."),
+        ("Air Niugini 767 lands safely in Davao.",
+         "All 146 aboard escape injury after an engine-fire warning."),
+        ("Nigeria funeral boat sinks.",
+         "At least four die as a boat carrying mourners sinks in Bayelsa."),
+        ("Antonelli fastest, Verstappen on pole.",
+         "Antonelli tops Las Vegas qualifying; a penalty hands Verstappen pole."),
+    ]),
+    ("FRI 20 NOV, CONT.", [
+        ("(Fri) First US measles death of 2026.",
+         "A young child in Virginia dies; the state had seen none since 1978."),
+        ("(Fri) Record EU payment to Ukraine.",
+         "Brussels disburses 7.9bn euros, its biggest single Ukraine tranche."),
+        ("(Fri) Denmark expels Russian attache.",
+         "Copenhagen acts after foiling an alleged plot to kill a rapper."),
+        ("(Fri) India unveils first H5N1 vaccine.",
+         "A home-grown bird-flu vaccine for chickens is dedicated in Bhopal."),
+        ("(Thu) 900,000 AI chips for China.",
+         "House panel counts 879,000 Nvidia and AMD licences."),
+        ("(Fri) Tanker fire in Hormuz strait.",
+         "A tanker burns after a strike in the Strait of Hormuz."),
+        ("(Fri) SCO forum opens in Delhi.",
+         "Pakistan's minister attends the Shanghai forum in New Delhi."),
+        ("(Fri) Mamdani: Rikers to close by 2032.",
+         "New York's mayor sets a new date to shut the island jail complex."),
+    ]),
+]
+
+WIRE = [
+    ("00:09", "Peru quake, Junin"),
+    ("02:27", "Kryvyi Rih toll reported"),
+    ("03:34", "OFAC sanctions published"),
+    ("04:04", "Zelenskyy: US floated Donbas-for-NATO idea"),
+    ("04:32", "Zelenskyy: Putin 'a killer'"),
+    ("04:34", "Palisades arson verdict"),
+    ("05:57", "Denmark plot exposed"),
+    ("08:34", "ANC fights for its cities"),
+]
+
+# (label, lon, lat, label dx, label dy) -- offsets keep labels from colliding
 MAP_DOTS = [
-    (0.16, 0.62, "PERU", 6, -5),
-    (0.24, 0.30, "NEW YORK", 6, -5),
-    (0.46, 0.24, "POLAND", -52, -6),
-    (0.50, 0.34, "DENMARK", 6, -12),
-    (0.44, 0.44, "THE HAGUE", 6, 2),
-    (0.60, 0.55, "HORMUZ", 6, -5),
-    (0.84, 0.36, "SHENZHEN", -62, -6),
-    (0.76, 0.58, "ODISHA", 6, 2),
+    ("F1", 30.7, 36.9, -26, 4),    # Antalya
+    ("F2", 46.7, 24.7, 8, 6),     # Riyadh
+    ("F3", -76.0, -10.9, 8, 6),   # Junin, Peru
+    ("F4", 33.4, 47.9, 8, -14),   # Kryvyi Rih
+    ("F5", 174.8, -41.3, -26, -4),  # Wellington
+    ("F6", -74.0, 40.7, -26, 6),  # New York markets
+    ("F7", 4.35, 50.85, -26, -14),  # Brussels
+    ("F8", -77.0, 38.9, 8, -14),  # Washington DC
 ]
 
+# Rough continent outlines in (lon, lat). Schematic, not survey-grade.
+CONTINENTS = [
+    [(-168, 66), (-140, 70), (-125, 72), (-110, 73), (-95, 80), (-85, 80),
+     (-80, 73), (-65, 62), (-55, 52), (-60, 47), (-70, 42), (-75, 35),
+     (-80, 26), (-84, 30), (-90, 21), (-97, 16), (-105, 20), (-115, 28),
+     (-125, 40), (-125, 49), (-140, 60), (-155, 58), (-165, 60)],
+    [(-58, 64), (-45, 60), (-40, 70), (-30, 76), (-20, 70), (-25, 60)],
+    [(-80, 9), (-75, 11), (-62, 10), (-52, 5), (-50, 0), (-44, -3),
+     (-35, -8), (-40, -20), (-48, -28), (-58, -38), (-65, -45), (-70, -54),
+     (-73, -37), (-73, -18), (-80, -5)],
+    [(-10, 36), (-9, 43), (-2, 48), (-4, 50), (0, 51), (5, 53), (8, 57),
+     (10, 59), (18, 56), (21, 55), (24, 58), (28, 60), (30, 70), (40, 68),
+     (45, 60), (40, 50), (35, 45), (30, 42), (28, 40), (23, 36), (19, 40),
+     (12, 44), (3, 42), (-2, 37)],
+    [(-6, 35), (10, 37), (20, 32), (32, 31), (35, 28), (43, 12), (51, 11),
+     (48, 2), (41, -10), (36, -18), (32, -26), (26, -34), (19, -35),
+     (15, -27), (12, -18), (9, 4), (-8, 5), (-15, 11), (-17, 15)],
+    [(40, 68), (60, 70), (75, 73), (90, 75), (110, 77), (130, 72),
+     (160, 70), (178, 66), (170, 60), (162, 56), (158, 50), (142, 45),
+     (140, 40), (135, 35), (127, 33), (122, 30), (120, 25), (110, 20),
+     (105, 10), (100, 8), (98, 16), (92, 21), (88, 22), (80, 15),
+     (77, 8), (72, 20), (66, 25), (60, 25), (56, 26), (52, 28), (48, 30),
+     (44, 30), (40, 36), (36, 36), (30, 36)],
+    [(113, -22), (114, -30), (115, -35), (124, -33), (130, -32),
+     (137, -35), (140, -38), (147, -39), (153, -32), (153, -27),
+     (146, -19), (142, -11), (136, -12), (132, -12), (126, -14),
+     (122, -17)],
+]
 
-def draw_map(d, x, y, w, h):
-    d.rectangle([x, y, x + w, y + h], fill=(22, 68, 88))
-    # rough continent blobs (stylised, not to scale)
-    blobs = [
-        [(0.03, 0.25), (0.10, 0.15), (0.20, 0.18), (0.24, 0.35),
-         (0.20, 0.55), (0.16, 0.75), (0.10, 0.70), (0.05, 0.45)],
-        [(0.28, 0.30), (0.36, 0.18), (0.45, 0.20), (0.48, 0.35),
-         (0.44, 0.55), (0.38, 0.75), (0.32, 0.60), (0.28, 0.45)],
-        [(0.48, 0.18), (0.60, 0.12), (0.72, 0.18), (0.78, 0.30),
-         (0.74, 0.45), (0.66, 0.55), (0.58, 0.45), (0.52, 0.30)],
-        [(0.82, 0.25), (0.90, 0.20), (0.97, 0.30), (0.95, 0.55),
-         (0.88, 0.70), (0.84, 0.50), (0.82, 0.35)],
-        [(0.55, 0.70), (0.65, 0.65), (0.72, 0.75), (0.62, 0.85),
-         (0.55, 0.80)],
-    ]
-    for blob in blobs:
-        pts = [(x + fx * w, y + fy * h) for fx, fy in blob]
-        d.polygon(pts, fill=(120, 160, 140))
-    f_dot = font(SANS_B, 9)
-    for fx, fy, label, ldx, ldy in MAP_DOTS:
-        cx, cy = x + fx * w, y + fy * h
-        d.ellipse([cx - 4, cy - 4, cx + 4, cy + 4], fill=(255, 90, 60),
-                  outline=(255, 255, 255), width=1)
-        d.text((cx + ldx, cy + ldy), label, font=f_dot, fill=(255, 255, 255))
+DATE_CHECK = ("Top stories of the week, Mon 17 - Sat 21 Nov 2026 (UTC). "
+              "Featured: Sat 21 Nov. Briefs marked (Mon)-(Fri) happened on "
+              "those days; unmarked briefs are Sat 21 Nov.")
+FOOTER_SRC = ("Sources: BBC, Reuters, AP, AFP, USGS, NASA, European Commission. "
+              "All times UTC. Figures as reported at build time.")
+
+
+# ---------------------------------------------------------------- drawing
+def draw_masthead(draw):
+    y = 8
+    f_kick = load_font(bold=True, size=11)
+    kick = "WEEK IN REVIEW  |  MON 17 - SAT 21 NOV 2026"
+    tw = draw.textlength(kick, font=f_kick)
+    draw.text(((W - tw) / 2, y), kick, font=f_kick, fill=RED)
+    y += 16
+    f_title = load_font(bold=True, serif=True, size=32)
+    title = "The World in One Day"
+    tw = draw.textlength(title, font=f_title)
+    draw.text(((W - tw) / 2, y), title, font=f_title, fill=INK)
+    y += 38
+    f_sub = load_font(bold=True, size=12)
+    sub = "Saturday 21 November 2026  -  55 Verified Stories"
+    tw = draw.textlength(sub, font=f_sub)
+    draw.text(((W - tw) / 2, y), sub, font=f_sub, fill=NAVY)
+    draw.line([(MARGIN, 78), (W - MARGIN, 78)], fill=INK, width=2)
+
+
+def draw_wire(draw, y0, y1):
+    draw.rectangle([MARGIN, y0, W - MARGIN, y1], fill=WIRE_BG)
+    draw.rectangle([MARGIN, y0, W - MARGIN, y1], outline=RULE, width=1)
+    f_lab = load_font(bold=True, size=10)
+    f_txt = load_font(size=10)
+    f_bold = load_font(bold=True, size=10)
+    label = "UTC WIRE"
+    draw.text((MARGIN + 6, y0 + 4), label, font=f_lab, fill=RED)
+    lx = MARGIN + 6 + draw.textlength(label, font=f_lab) + 10
+    # Two lines of wire items, 4 per line.
+    items = ["%s %s" % (t, s) for t, s in WIRE]
+    for row, chunk in enumerate((items[:4], items[4:])):
+        words = []
+        fonts = []
+        for it in chunk:
+            time_part, _, rest = it.partition(" ")
+            words += [time_part] + rest.split() + ["|"]
+            fonts += [f_bold] + [f_txt] * len(rest.split()) + [f_txt]
+        words = words[:-1]
+        fonts = fonts[:-1]
+        lines = wrap_words(draw, words, fonts, W - 2 * MARGIN - (lx - MARGIN) - 6)
+        draw_wrapped(draw, lines, lx, y0 + 3 + row * 13, 13)
+
+
+def draw_featured(draw, y0):
+    f_tag = load_font(bold=True, size=9)
+    f_head = load_font(bold=True, size=13)
+    f_body = load_font(size=11)
+    pw = (W - 2 * MARGIN - 3 * 8) // 4
+    ph = 110
+    for i, (fid, place, head, body) in enumerate(FEATURED):
+        r, c = divmod(i, 4)
+        x = MARGIN + c * (pw + 8)
+        y = y0 + r * (ph + 4)
+        draw.rectangle([x, y, x + pw, y + ph], fill=PANEL, outline=PANEL_EDGE)
+        tx = x + 8
+        ty = y + 6
+        draw.text((tx, ty), "%s  %s" % (fid, place), font=f_tag, fill=RED)
+        ty += 14
+        lines = wrap_words(draw, head.split(), [f_head] * len(head.split()), pw - 16)
+        if len(lines) > 2:
+            warn("featured %s headline %d lines" % (fid, len(lines)))
+            lines = lines[:2]
+        ty = draw_wrapped(draw, lines, tx, ty, 16)
+        ty += 2
+        blines = wrap_words(draw, body.split(), [f_body] * len(body.split()), pw - 16)
+        if len(blines) > 4:
+            warn("featured %s body %d lines" % (fid, len(blines)))
+            blines = blines[:4]
+        draw_wrapped(draw, blines, tx, ty, 13)
+    return y0 + 2 * ph + 4
+
+
+def draw_map(draw, y0, y1):
+    f_lab = load_font(bold=True, size=10)
+    f_dot = load_font(bold=True, size=8)
+    draw.text((MARGIN, y0), "WORLD MAP -- WHERE TODAY'S TOP STORIES HAPPENED",
+              font=f_lab, fill=NAVY)
+    mx0, mx1 = MARGIN, W - MARGIN
+    my0, my1 = y0 + 14, y1 - 2
+    draw.rectangle([mx0, my0, mx1, my1], fill=MAP_OCEAN, outline=RULE)
+    mw, mh = mx1 - mx0, my1 - my0
+
+    def proj(lon, lat):
+        return (mx0 + (lon + 180.0) / 360.0 * mw,
+                my0 + (80.0 - lat) / 135.0 * mh)
+
+    for poly in CONTINENTS:
+        pts = [proj(lon, lat) for lon, lat in poly]
+        draw.polygon(pts, fill=MAP_LAND, outline=(150, 148, 120))
+    for label, lon, lat, dx, dy in MAP_DOTS:
+        x, yy = proj(lon, lat)
+        draw.ellipse([x - 5, yy - 5, x + 5, yy + 5], fill=MAP_DOT,
+                     outline=(255, 255, 255))
+        lx = min(max(x + dx, mx0 + 2), mx1 - 16)
+        ly = min(max(yy + dy, my0 + 1), my1 - 10)
+        draw.line([(x, yy), (lx + 7, ly + 4)], fill=MAP_DOT, width=1)
+        draw.text((lx, ly), label, font=f_dot, fill=INK,
+                  stroke_width=2, stroke_fill=MAP_OCEAN)
+
+
+def draw_briefs(draw, y0, y1):
+    f_sec = load_font(bold=True, size=11)
+    f_bold = load_font(bold=True, size=11)
+    f_reg = load_font(size=11)
+    col_w = (W - 2 * MARGIN - 2 * 10) // 3
+    for ci, groups in enumerate((BRIEFS_A, BRIEFS_B, BRIEFS_C)):
+        x = MARGIN + ci * (col_w + 10)
+        y = y0
+        for header, items in groups:
+            draw.rectangle([x, y, x + col_w, y + 17], fill=NAVY)
+            draw.text((x + 6, y + 3), header, font=f_sec, fill=(255, 255, 255))
+            y += 17 + 4
+            for lead, rest in items:
+                lines = mixed_block(draw, lead, rest, f_bold, f_reg,
+                                    col_w - 4, 2, lead[:28])
+                y = draw_wrapped(draw, lines, x + 2, y, 13)
+                y += 3
+            y += 2
+        if y > y1:
+            warn("briefs column %d overflows by %d px" % (ci + 1, y - y1))
+
+
+def draw_footer(draw, y0):
+    draw.rectangle([MARGIN, y0, W - MARGIN, y0 + 34], fill=FOOT_BG)
+    f_txt = load_font(size=10)
+    f_b = load_font(bold=True, size=10)
+    lines = wrap_words(draw, DATE_CHECK.split(),
+                       [f_txt] * len(DATE_CHECK.split()), W - 2 * MARGIN - 12)
+    draw_wrapped(draw, lines, MARGIN + 6, y0 + 3, 12)
+    draw.text((MARGIN + 6, y0 + 21), FOOTER_SRC, font=f_b, fill=MUTED)
+
+
+def render():
+    img = Image.new("RGB", (W, H), PAPER)
+    draw = ImageDraw.Draw(img)
+    draw_masthead(draw)
+    draw_wire(draw, 82, 116)
+    y = draw_featured(draw, 122)
+    draw_map(draw, y + 6, y + 76)
+    draw_briefs(draw, y + 82, 984)
+    draw_footer(draw, 988)
+    return img
 
 
 def main():
-    img = Image.new("RGB", (W, H), PAPER)
-    d = ImageDraw.Draw(img)
-
-    # ---------------------------------------------------------------- masthead
-    d.rectangle([0, 0, W, 96], fill=NAVY)
-    d.rectangle([0, 96, W, 100], fill=GOLD)
-    f_title = font(SERIF_B, 44)
-    f_sub = font(SANS_B, 15)
-    f_check = font(SANS, 11)
-    d.text((16, 8), "THE WORLD IN ONE DAY", font=f_title, fill=(255, 255, 255))
-    d.text((16, 62), "SATURDAY, 21 NOVEMBER 2026  |  46 VERIFIED STORIES",
-           font=f_sub, fill=(255, 214, 90))
-    d.text((16, 82), "DATE CHECK: every item below was reported 21 Nov 2026 (UTC); "
-           "events from Fri 20 Nov are marked 'Fri'.",
-           font=f_check, fill=(200, 210, 220))
-    right_txt = "EARLY-DAY EDITION  |  v1"
-    d.text((W - 16 - d.textlength(right_txt, font=f_sub), 62),
-           right_txt, font=f_sub, fill=(255, 214, 90))
-
-    # ------------------------------------------------------- UTC timeline strip
-    d.rectangle([0, 100, W, 132], fill=BAND)
-    d.line([0, 132, W, 132], fill=LINE, width=1)
-    f_tl = font(SANS, 9)
-    f_tlb = font(SANS_B, 9)
-    x = 16
-    d.text((x, 106), "UTC WIRE", font=f_tlb, fill=NAVY)
-    x += d.textlength("UTC WIRE  ", font=f_tlb)
-    for t, label in TIMELINE:
-        seg = t + " " + label
-        wseg = d.textlength(seg, font=f_tl) + 10
-        d.text((x, 106), t, font=f_tlb, fill=RED)
-        d.text((x + d.textlength(t + " ", font=f_tlb), 106), label,
-               font=f_tl, fill=INK)
-        x += wseg
-        if x > W - 20:
-            break
-    d.text((16, 118), "All times UTC, 21 Nov 2026. Full-day rebuild planned this evening.",
-           font=f_tl, fill=MUTED)
-
-    # ------------------------------------------------------------ featured rows
-    f_kick = font(SANS_B, 11)
-    f_head = font(SANS_B, 16)
-    f_head_big = font(SANS_B, 19)
-    f_det = font(SANS, 11)
-    f_src = font(SANS, 9)
-
-    def panel(px, py, pw, ph, idx):
-        kick, head, det, src = FEATURED[idx]
-        col = ACCENTS[idx % len(ACCENTS)]
-        d.rectangle([px, py, px + pw, py + ph], fill=CARD,
-                    outline=LINE, width=1)
-        d.rectangle([px, py, px + pw, py + 22], fill=col)
-        d.text((px + 8, py + 4), kick, font=f_kick, fill=(255, 255, 255))
-        d.text((px + pw - 8 - d.textlength("F" + str(idx + 1), font=f_kick),
-                py + 4), "F" + str(idx + 1), font=f_kick,
-               fill=(255, 255, 255))
-        big = ph > 140
-        gh = 52 if big else 40
-        gy = py + 30
-        GLYPHS[idx](d, px + 8, gy, gh, col)
-        tx = px + 8 + gh + 10
-        tw = px + pw - 8 - tx
-        hf = f_head_big if big else f_head
-        lines = wrap(d, head, hf, tw)
-        ly = gy
-        for ln in lines[:3]:
-            d.text((tx, ly), ln, font=hf, fill=INK)
-            ly += 22 if big else 19
-        d.text((px + 8, py + ph - 34),
-               fit_line(d, det, f_det, pw - 16), font=f_det, fill=MUTED)
-        d.text((px + 8, py + ph - 19), "SOURCE: " + src, font=f_src,
-               fill=MUTED)
-
-    # row A: 2 large panels
-    panel(8, 140, 500, 150, 0)
-    panel(516, 140, 500, 150, 1)
-    # row B: 3 panels
-    bx = [8, 348, 688]
-    for i, px in enumerate(bx):
-        panel(px, 298, 328, 122, 2 + i)
-    # row C: 3 panels
-    for i, px in enumerate(bx):
-        panel(px, 428, 328, 122, 5 + i)
-
-    # ---------------------------------------------------------------- briefs
-    by = 558
-    f_bh = font(SANS_B, 13)
-    f_gh = font(SANS_B, 10)
-    f_bi = font(SANS, 10)
-    d.rectangle([0, by, W, by + 24], fill=NAVY2)
-    d.text((16, by + 4), "WORLD BRIEFS  —  38 MORE STORIES, GROUPED BY REGION",
-           font=f_bh, fill=(255, 255, 255))
-    d.text((W - 16 - d.textlength("1 line = 1 verified story", font=f_gh),
-            by + 6), "1 line = 1 verified story", font=f_gh,
-           fill=(200, 210, 220))
-
-    col_w = 488
-    col_x = [16, 520]
-    # columns: 0 -> North America + Europe ; 1 -> Asia + ME&Afr + Sci/Tech/Sport
-    col_groups = [[0, 1], [2, 3, 4]]
-    row_h = 15
-    iy = by + 30
-    for ci, groups in enumerate(col_groups):
-        cx = col_x[ci]
-        yy = iy
-        for gi in groups:
-            gname, items = BRIEFS[gi]
-            d.text((cx, yy), gname, font=f_gh, fill=NAVY)
-            yy += row_h
-            for it in items:
-                d.text((cx, yy), "- " + fit_line(d, it, f_bi, col_w - 12),
-                       font=f_bi, fill=INK)
-                yy += row_h
-            yy += 4
-
-    # ---------------------------------------------------------------- map strip
-    my = 924
-    d.rectangle([0, my, W, my + 60], fill=(255, 255, 255))
-    d.line([0, my, W, my], fill=LINE, width=1)
-    draw_map(d, 16, my + 4, 700, 52)
-    f_map = font(SANS_B, 10)
-    f_map2 = font(SANS, 10)
-    d.text((736, my + 8), "WHERE IT HAPPENED", font=f_map, fill=NAVY)
-    d.text((736, my + 24), "Red dots mark the 8 featured", font=f_map2,
-           fill=INK)
-    d.text((736, my + 38), "stories, from Peru to Shenzhen.", font=f_map2,
-           fill=INK)
-    d.text((736, my + 52), "Map stylised, not to scale.", font=f_map2,
-           fill=MUTED)
-
-    # ---------------------------------------------------------------- footer
-    fy = 988
-    d.rectangle([0, fy, W, H], fill=NAVY)
-    f_ft = font(SANS, 10)
-    d.text((16, fy + 6),
-           "Editorial illustrations, not photographs. Sources: Reuters, AP, AFP, "
-           "BBC, Al Jazeera, Xinhua, wire reports — 21 November 2026 (UTC).",
-           font=f_ft, fill=(220, 225, 230))
-    d.text((16, fy + 22),
-           "46 verified stories  |  v1 early-day edition — full-day rebuild planned "
-           "this evening.  |  make.fun bounty news-image-20261121",
-           font=f_ft, fill=(180, 190, 200))
-
-    os.makedirs(OUT_DIR, exist_ok=True)
-    img.save(OUT_PATH, format="PNG", optimize=True)
+    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
+    os.makedirs(out_dir, exist_ok=True)
+    img = render()
+    out_path = os.path.join(out_dir, "entry.png")
+    img.save(out_path, format="PNG", optimize=True)
+    for w in WARNINGS:
+        print("WARNING: " + w, file=sys.stderr)
+    print("wrote %s (%dx%d)" % (out_path, W, H))
 
 
 if __name__ == "__main__":
